@@ -431,6 +431,123 @@ async function runTests(): Promise<TestResult[]> {
     }
   });
 
+  // ---- SenderKey / Group Messaging Tests ----
+
+  // In-memory SenderKeyStore for testing
+  function createSenderKeyStore() {
+    const records = new Map<string, any>();
+    function makeKey(sender: any, distributionId: Uint8Array): string {
+      const name = __libsignal_native.ProtocolAddress_Name(sender);
+      const deviceId = __libsignal_native.ProtocolAddress_DeviceId(sender);
+      const idHex = Array.from(distributionId).map((b: number) => b.toString(16).padStart(2, '0')).join('');
+      return `${name}:${deviceId}:${idHex}`;
+    }
+    return {
+      _getSenderKey(sender: any, distributionId: Uint8Array): any {
+        const key = makeKey(sender, distributionId);
+        return records.get(key) || null;
+      },
+      _saveSenderKey(sender: any, distributionId: Uint8Array, record: any): void {
+        const key = makeKey(sender, distributionId);
+        records.set(key, record);
+      },
+    };
+  }
+
+  // Test 27: SenderKeyDistributionMessage_Create
+  test('SenderKeyDistributionMessage_Create', () => {
+    const sender = __libsignal_native.ProtocolAddress_New('+14155550100', 1);
+    const distributionId = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) distributionId[i] = i + 1;
+    const store = createSenderKeyStore();
+
+    const skdm = __libsignal_native.SenderKeyDistributionMessage_Create(sender, distributionId, store);
+    if (!skdm) {
+      throw new Error('SenderKeyDistributionMessage_Create returned null');
+    }
+  });
+
+  // Test 28: SenderKeyDistributionMessage_Process
+  test('SenderKeyDistributionMessage_Process', () => {
+    const sender = __libsignal_native.ProtocolAddress_New('+14155550100', 1);
+    const distributionId = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) distributionId[i] = i + 1;
+    const senderStore = createSenderKeyStore();
+    const receiverStore = createSenderKeyStore();
+
+    // Create SKDM on sender side
+    const skdm = __libsignal_native.SenderKeyDistributionMessage_Create(sender, distributionId, senderStore);
+
+    // Process SKDM on receiver side
+    __libsignal_native.SenderKeyDistributionMessage_Process(sender, skdm, receiverStore);
+    // If no exception, processing succeeded
+  });
+
+  // Test 29: GroupCipher encrypt/decrypt round-trip
+  test('GroupCipher encrypt/decrypt round-trip', () => {
+    const sender = __libsignal_native.ProtocolAddress_New('+14155550100', 1);
+    const distributionId = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) distributionId[i] = i + 1;
+    const senderStore = createSenderKeyStore();
+    const receiverStore = createSenderKeyStore();
+
+    // Create and distribute SKDM
+    const skdm = __libsignal_native.SenderKeyDistributionMessage_Create(sender, distributionId, senderStore);
+    __libsignal_native.SenderKeyDistributionMessage_Process(sender, skdm, receiverStore);
+
+    // Encrypt a message
+    const plaintext = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
+    const ciphertext = __libsignal_native.GroupCipher_EncryptMessage(sender, distributionId, plaintext, senderStore);
+    if (!ciphertext) {
+      throw new Error('GroupCipher_EncryptMessage returned null');
+    }
+
+    // Serialize the ciphertext
+    const serialized = __libsignal_native.CiphertextMessage_Serialize(ciphertext);
+    if (!serialized || serialized.length === 0) {
+      throw new Error('CiphertextMessage_Serialize returned empty');
+    }
+
+    // Decrypt the message
+    const decrypted = __libsignal_native.GroupCipher_DecryptMessage(sender, serialized, receiverStore);
+    if (!decrypted || decrypted.length !== plaintext.length) {
+      throw new Error(`Decrypted length mismatch: expected ${plaintext.length}, got ${decrypted?.length}`);
+    }
+    for (let i = 0; i < plaintext.length; i++) {
+      if (decrypted[i] !== plaintext[i]) {
+        throw new Error(`Byte mismatch at index ${i}: expected ${plaintext[i]}, got ${decrypted[i]}`);
+      }
+    }
+  });
+
+  // Test 30: GroupCipher multiple messages
+  test('GroupCipher multiple messages', () => {
+    const sender = __libsignal_native.ProtocolAddress_New('+14155550100', 1);
+    const distributionId = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) distributionId[i] = 0xAA;
+    const senderStore = createSenderKeyStore();
+    const receiverStore = createSenderKeyStore();
+
+    const skdm = __libsignal_native.SenderKeyDistributionMessage_Create(sender, distributionId, senderStore);
+    __libsignal_native.SenderKeyDistributionMessage_Process(sender, skdm, receiverStore);
+
+    // Encrypt and decrypt multiple messages
+    for (let msgIdx = 0; msgIdx < 3; msgIdx++) {
+      const msg = new Uint8Array([msgIdx, msgIdx + 1, msgIdx + 2]);
+      const ct = __libsignal_native.GroupCipher_EncryptMessage(sender, distributionId, msg, senderStore);
+      const ser = __libsignal_native.CiphertextMessage_Serialize(ct);
+      const dec = __libsignal_native.GroupCipher_DecryptMessage(sender, ser, receiverStore);
+      if (dec.length !== msg.length) {
+        throw new Error(`Message ${msgIdx}: length mismatch`);
+      }
+      for (let i = 0; i < msg.length; i++) {
+        if (dec[i] !== msg[i]) {
+          throw new Error(`Message ${msgIdx}: byte mismatch at ${i}`);
+        }
+      }
+    }
+  });
+
   return results;
 }
 

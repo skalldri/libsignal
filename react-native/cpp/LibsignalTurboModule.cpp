@@ -421,12 +421,185 @@ void LibsignalModule::registerHandwrittenFunctions(jsi::Runtime& rt) {
         return jsi::Value::undefined();
     };
 
-    // TODO: Add store callback implementations:
-    // - SessionStore operations
-    // - IdentityKeyStore operations
-    // - PreKeyStore operations
-    // - SenderKeyStore operations
-    // These require setting up C function pointer callbacks that invoke JSI functions.
+    // ---- SenderKeyStore callback bridge ----
+    // These 4 functions take a JS SenderKeyStore object with _getSenderKey and
+    // _saveSenderKey methods. The C FFI invokes C function pointer callbacks
+    // synchronously on the calling thread (the JS thread), so the JS methods
+    // are called synchronously — they must return values, not Promises.
+
+    // Context struct passed through the void* ctx of the callback struct
+    struct SenderKeyStoreCtx {
+        jsi::Runtime* rt;
+        jsi::Object* store;
+    };
+
+    // C callback: load_sender_key → calls store._getSenderKey(sender, distributionId)
+    static auto senderKeyLoad = [](
+        void* ctx,
+        SignalMutPointerSenderKeyRecord* out,
+        SignalMutPointerProtocolAddress sender,
+        SignalUuid distribution_id
+    ) -> int {
+        auto* c = static_cast<SenderKeyStoreCtx*>(ctx);
+        auto& rt = *c->rt;
+        try {
+            // Wrap the sender ProtocolAddress as a NativePointer (no destructor — Rust owns it)
+            auto senderObj = std::make_shared<NativePointer>(
+                reinterpret_cast<void*>(sender.raw), nullptr);
+            auto senderVal = jsi::Object::createFromHostObject(rt, senderObj);
+
+            // Convert UUID to Uint8Array
+            auto uuidVal = fixedArrayToJsi(rt, distribution_id.bytes, 16);
+
+            // Call store._getSenderKey(sender, distributionId)
+            auto fn = c->store->getPropertyAsFunction(rt, "_getSenderKey");
+            auto result = fn.callWithThis(rt, *c->store, senderVal, uuidVal);
+
+            if (result.isNull() || result.isUndefined()) {
+                out->raw = nullptr;
+            } else {
+                // Result is a NativePointer wrapping a SenderKeyRecord.
+                // We need to clone it because the caller takes ownership.
+                auto hostObj = result.asObject(rt).asHostObject<NativePointer>(rt);
+                SignalConstPointerSenderKeyRecord src;
+                src.raw = reinterpret_cast<const SignalSenderKeyRecord*>(hostObj->get());
+                SignalFfiError* err = signal_sender_key_record_clone(out, src);
+                if (err) {
+                    signal_error_free(err);
+                    return -1;
+                }
+            }
+            return 0;
+        } catch (...) {
+            out->raw = nullptr;
+            return -1;
+        }
+    };
+
+    // C callback: store_sender_key → calls store._saveSenderKey(sender, distributionId, record)
+    static auto senderKeyStore = [](
+        void* ctx,
+        SignalMutPointerProtocolAddress sender,
+        SignalUuid distribution_id,
+        SignalMutPointerSenderKeyRecord record
+    ) -> int {
+        auto* c = static_cast<SenderKeyStoreCtx*>(ctx);
+        auto& rt = *c->rt;
+        try {
+            auto senderObj = std::make_shared<NativePointer>(
+                reinterpret_cast<void*>(sender.raw), nullptr);
+            auto senderVal = jsi::Object::createFromHostObject(rt, senderObj);
+
+            auto uuidVal = fixedArrayToJsi(rt, distribution_id.bytes, 16);
+
+            // Clone the record so JS can own it independently
+            SignalMutPointerSenderKeyRecord cloned = {nullptr};
+            SignalConstPointerSenderKeyRecord src;
+            src.raw = record.raw;
+            SignalFfiError* cloneErr = signal_sender_key_record_clone(&cloned, src);
+            if (cloneErr) {
+                signal_error_free(cloneErr);
+                return -1;
+            }
+
+            auto recordObj = std::make_shared<NativePointer>(
+                reinterpret_cast<void*>(cloned.raw),
+                [](void* p) { signal_sender_key_record_destroy(SignalMutPointerSenderKeyRecord{reinterpret_cast<SignalSenderKeyRecord*>(p)}); });
+            auto recordVal = jsi::Object::createFromHostObject(rt, recordObj);
+
+            auto fn = c->store->getPropertyAsFunction(rt, "_saveSenderKey");
+            fn.callWithThis(rt, *c->store, senderVal, uuidVal, recordVal);
+            return 0;
+        } catch (...) {
+            return -1;
+        }
+    };
+
+    static auto senderKeyDestroy = [](void* ctx) {
+        // Context is stack-allocated, nothing to free
+    };
+
+    // Helper lambda to build a SenderKeyStore callback struct from a JS object
+    auto makeSenderKeyStoreStruct = [](jsi::Runtime& rt, jsi::Object& storeObj,
+            SenderKeyStoreCtx& ctx) -> SignalConstPointerFfiSenderKeyStoreStruct {
+        ctx.rt = &rt;
+        ctx.store = &storeObj;
+        // Use a thread_local to hold the struct across the synchronous FFI call
+        thread_local SignalFfiBridgeSenderKeyStoreStruct storeStruct;
+        storeStruct.ctx = &ctx;
+        storeStruct.load_sender_key = senderKeyLoad;
+        storeStruct.store_sender_key = senderKeyStore;
+        storeStruct.destroy = senderKeyDestroy;
+        return SignalConstPointerFfiSenderKeyStoreStruct{&storeStruct};
+    };
+
+    // SenderKeyDistributionMessage_Create(sender, distributionId, store) → NativePointer
+    functions_["SenderKeyDistributionMessage_Create"] = [makeSenderKeyStoreStruct](
+            jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+        auto sender = jsiToConstPointer<SignalConstPointerProtocolAddress>(rt, args[0]);
+        auto distId = jsiToUuid(rt, args[1]);
+        auto storeObj = args[2].asObject(rt);
+
+        SenderKeyStoreCtx ctx;
+        auto storePtr = makeSenderKeyStoreStruct(rt, storeObj, ctx);
+
+        SignalMutPointerSenderKeyDistributionMessage out = {nullptr};
+        checkError(rt, signal_sender_key_distribution_message_create(&out, sender, distId, storePtr));
+
+        auto result = std::make_shared<NativePointer>(
+            reinterpret_cast<void*>(out.raw),
+            [](void* p) { signal_sender_key_distribution_message_destroy(SignalMutPointerSenderKeyDistributionMessage{reinterpret_cast<SignalSenderKeyDistributionMessage*>(p)}); });
+        return jsi::Object::createFromHostObject(rt, result);
+    };
+
+    // SenderKeyDistributionMessage_Process(sender, skdm, store) → undefined
+    functions_["SenderKeyDistributionMessage_Process"] = [makeSenderKeyStoreStruct](
+            jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+        auto sender = jsiToConstPointer<SignalConstPointerProtocolAddress>(rt, args[0]);
+        auto skdm = jsiToConstPointer<SignalConstPointerSenderKeyDistributionMessage>(rt, args[1]);
+        auto storeObj = args[2].asObject(rt);
+
+        SenderKeyStoreCtx ctx;
+        auto storePtr = makeSenderKeyStoreStruct(rt, storeObj, ctx);
+
+        checkError(rt, signal_process_sender_key_distribution_message(sender, skdm, storePtr));
+        return jsi::Value::undefined();
+    };
+
+    // GroupCipher_EncryptMessage(sender, distributionId, message, store) → NativePointer(CiphertextMessage)
+    functions_["GroupCipher_EncryptMessage"] = [makeSenderKeyStoreStruct](
+            jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+        auto sender = jsiToConstPointer<SignalConstPointerProtocolAddress>(rt, args[0]);
+        auto distId = jsiToUuid(rt, args[1]);
+        auto message = jsiToBuffer(rt, args[2]);
+        auto storeObj = args[3].asObject(rt);
+
+        SenderKeyStoreCtx ctx;
+        auto storePtr = makeSenderKeyStoreStruct(rt, storeObj, ctx);
+
+        SignalMutPointerCiphertextMessage out = {nullptr};
+        checkError(rt, signal_group_encrypt_message(&out, sender, distId, message, storePtr));
+
+        auto result = std::make_shared<NativePointer>(
+            reinterpret_cast<void*>(out.raw),
+            [](void* p) { signal_ciphertext_message_destroy(SignalMutPointerCiphertextMessage{reinterpret_cast<SignalCiphertextMessage*>(p)}); });
+        return jsi::Object::createFromHostObject(rt, result);
+    };
+
+    // GroupCipher_DecryptMessage(sender, message, store) → Uint8Array
+    functions_["GroupCipher_DecryptMessage"] = [makeSenderKeyStoreStruct](
+            jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+        auto sender = jsiToConstPointer<SignalConstPointerProtocolAddress>(rt, args[0]);
+        auto message = jsiToBuffer(rt, args[1]);
+        auto storeObj = args[2].asObject(rt);
+
+        SenderKeyStoreCtx ctx;
+        auto storePtr = makeSenderKeyStoreStruct(rt, storeObj, ctx);
+
+        SignalOwnedBuffer out = {nullptr, 0};
+        checkError(rt, signal_group_decrypt_message(&out, sender, message, storePtr));
+        return ownedBufferToJsi(rt, out);
+    };
 
     // ---- Testing async functions (require libsignal_ffi.so built with testing feature) ----
     // These use the TokioAsyncContext and return Promises, exercising the full async pipeline.
