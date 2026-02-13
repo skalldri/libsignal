@@ -1,0 +1,88 @@
+apply plugin: 'com.android.library'
+apply plugin: 'maven-publish'
+
+android {
+    namespace "org.signal.libsignal.reactnative"
+    compileSdk 35
+    ndkVersion "27.1.12297006"
+
+    defaultConfig {
+        minSdk 24
+        targetSdk 34
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-O2 -frtti -fexceptions -std=c++17"
+                // Build for architectures we have Rust .so files for
+                abiFilters "arm64-v8a", "armeabi-v7a", "x86_64", "x86"
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['jniLibs']
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // Exclude React Native .so files from the AAR — the consuming app provides these
+    packagingOptions {
+        exclude 'jni/**/libc++_shared.so'
+        exclude 'jni/**/libfbjni.so'
+        exclude 'jni/**/libjsi.so'
+        exclude 'jni/**/libreactnative.so'
+        exclude 'jni/**/libreactnativejni.so'
+        exclude 'jni/**/libhermes.so'
+        exclude 'jni/**/libhermestooling.so'
+    }
+}
+
+dependencies {
+    //noinspection GradleDynamicVersion
+    implementation "com.facebook.react:react-android:+"
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                artifact(bundleReleaseAar)
+
+                groupId = 'org.signal'
+                artifactId = 'libsignal-react-native'
+                version = '0.1.0'
+
+                pom.withXml {
+                    def dependenciesNode = asNode().appendNode('dependencies')
+                    def dep = dependenciesNode.appendNode('dependency')
+                    dep.appendNode('groupId', 'com.facebook.react')
+                    dep.appendNode('artifactId', 'react-android')
+                    dep.appendNode('scope', 'provided')
+                }
+            }
+        }
+    }
+}

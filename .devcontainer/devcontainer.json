@@ -1,0 +1,37 @@
+{
+  "name": "libsignal React Native Build",
+  "dockerComposeFile": ["./docker-compose.yml"],
+  "workspaceFolder": "/home/user/code",
+  "service": "libsignal",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    },
+    "ghcr.io/devcontainers/features/copilot-cli:1": {
+      "version": "0.0.406"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "github.copilot",
+        "github.copilot-chat"
+      ]
+    }
+  },
+  "mounts": [
+    "source=libsignal-cargo-cache,target=/usr/local/cargo/registry,type=volume",
+    "source=libsignal-cargo-git,target=/usr/local/cargo/git,type=volume",
+    "source=libsignal-target,target=${containerWorkspaceFolder}/target,type=volume",
+  ],
+  "containerEnv": {
+    "ANDROID_HOME": "/opt/android-sdk",
+    "ANDROID_NDK_HOME": "/opt/android-sdk/ndk/27.1.12297006",
+    "CMAKE_GENERATOR": "Ninja",
+    "LD_LIBRARY_PATH": "/usr/lib/wsl/lib"
+  },
+  "postCreateCommand": "./.devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+  "initializeCommand": "wsl -d docker-desktop --shell-type standard -- modprobe -a kvm kvm_amd"
+}
