@@ -189,7 +189,13 @@ This is the single largest install and the most critical dependency.
 
 ---
 
-### 10. Quick Smoke Test (Optional but Recommended)
+### 10. CMake
+
+- [ ] **Cmake** `brew install cmake`
+
+---
+
+### 11. Quick Smoke Test (Optional but Recommended)
 
 Before handing off to the agent, verify the Rust build works:
 

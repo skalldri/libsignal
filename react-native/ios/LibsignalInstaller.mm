@@ -6,6 +6,7 @@
 #import <React/RCTBridgeModule.h>
 #import <ReactCommon/RCTTurboModule.h>
 #import <React/RCTBridge+Private.h>
+#import <ReactCommon/CallInvoker.h>
 #import <jsi/jsi.h>
 #include "LibsignalTurboModule.h"
 
@@ -32,7 +33,8 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(install) {
         return @(NO);
     }
 
-    libsignal::LibsignalModule::install(*runtime);
+    auto callInvoker = bridge.jsCallInvoker;
+    libsignal::LibsignalModule::install(*runtime, callInvoker);
     return @(YES);
 }
 

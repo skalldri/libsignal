@@ -71,12 +71,63 @@ jobs:
         path: react-native/android/jniLibs/${{ matrix.abi }}/libsignal_ffi.so
         retention-days: 7
 
+  build-rust-ios:
+    name: Build libsignal_ffi iOS (${{ matrix.target }})
+
+    runs-on: macos-latest
+
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-ios
+            platform: ios-device
+          - target: aarch64-apple-ios-sim
+            platform: ios-sim-arm64
+          - target: x86_64-apple-ios
+            platform: ios-sim-x86_64
+
+    timeout-minutes: 120
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+
+    - name: Install Rust toolchain
+      run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal --target ${{ matrix.target }}
+
+    - name: Install protoc
+      run: brew install protobuf
+
+    - name: Build libsignal_ffi.a (release)
+      env:
+        IPHONEOS_DEPLOYMENT_TARGET: "15"
+      run: |
+        FEATURES_ARG=""
+        if [[ "${{ matrix.target }}" != "aarch64-apple-ios" ]]; then
+          FEATURES_ARG="--features libsignal-bridge-testing"
+        fi
+        CARGO_BUILD_TARGET="${{ matrix.target }}" \
+        RUSTFLAGS="--cfg aes_armv8 --cfg tokio_unstable" \
+        cargo build --release \
+          --manifest-path rust/bridge/ffi/Cargo.toml \
+          --target ${{ matrix.target }} \
+          ${FEATURES_ARG} \
+          --lib
+
+    - name: Upload native library
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: libsignal_ffi-${{ matrix.platform }}
+        path: target/${{ matrix.target }}/release/libsignal_ffi.a
+        retention-days: 7
+
   package:
     name: Package release zip
 
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
-    needs: build-rust
+    needs: [build-rust, build-rust-ios]
 
     timeout-minutes: 15
 
@@ -89,11 +140,25 @@ jobs:
       with:
         node-version: 22
 
-    - name: Download all native libraries
+    - name: Download Android native libraries
       uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
       with:
         path: react-native/android/jniLibs
-        pattern: libsignal_ffi-*
+        pattern: libsignal_ffi-arm*
+        merge-multiple: false
+
+    - name: Download Android x86 libraries
+      uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      with:
+        path: react-native/android/jniLibs
+        pattern: libsignal_ffi-x86*
+        merge-multiple: false
+
+    - name: Download iOS libraries
+      uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      with:
+        path: react-native/ios-artifacts
+        pattern: libsignal_ffi-ios-*
         merge-multiple: false
 
     - name: Arrange jniLibs into ABI directories
@@ -107,6 +172,37 @@ jobs:
         done
         echo "=== jniLibs contents ==="
         find . -type f -exec ls -lh {} \;
+
+    - name: Assemble iOS XCFramework
+      run: |
+        cd react-native
+        mkdir -p ios
+
+        # Copy device library
+        cp ios-artifacts/libsignal_ffi-ios-device/libsignal_ffi.a ios/libsignal_ffi.a
+
+        # Create fat simulator library from arm64 + x86_64
+        mkdir -p ios/.sim_staging
+        lipo -create \
+          ios-artifacts/libsignal_ffi-ios-sim-arm64/libsignal_ffi.a \
+          ios-artifacts/libsignal_ffi-ios-sim-x86_64/libsignal_ffi.a \
+          -output ios/.sim_staging/libsignal_ffi.a
+
+        # Create header directories
+        mkdir -p ios/.headers_device ios/.headers_sim
+        cp ../swift/Sources/SignalFfi/signal_ffi.h ios/.headers_device/
+        cp ../swift/Sources/SignalFfi/signal_ffi.h ios/.headers_sim/
+
+        # Build XCFramework
+        xcodebuild -create-xcframework \
+          -library ios/libsignal_ffi.a -headers ios/.headers_device \
+          -library ios/.sim_staging/libsignal_ffi.a -headers ios/.headers_sim \
+          -output ios/libsignal_ffi.xcframework
+
+        rm -rf ios/.sim_staging ios/.headers_device ios/.headers_sim ios-artifacts
+
+        echo "=== iOS XCFramework ==="
+        find ios/libsignal_ffi.xcframework -type f -exec ls -lh {} \;
 
     - name: Generate C++ headers
       run: |
@@ -130,7 +226,7 @@ jobs:
         cp react-native/package.json "${STAGING}/"
         cp react-native/tsconfig.json "${STAGING}/"
         cp react-native/README.md "${STAGING}/"
-        cp react-native/INTEGRATION.md "${STAGING}/"
+        cp react-native/docs/INTEGRATION.md "${STAGING}/"
 
         # Compiled TypeScript (JS + declarations)
         cp -r react-native/lib "${STAGING}/lib"
@@ -150,6 +246,12 @@ jobs:
                "${STAGING}/android/.cxx" \
                "${STAGING}/android/.gradle"
 
+        # iOS library (XCFramework, Obj-C++ installer, podspec)
+        mkdir -p "${STAGING}/ios"
+        cp -r react-native/ios/libsignal_ffi.xcframework "${STAGING}/ios/"
+        cp react-native/ios/LibsignalInstaller.mm "${STAGING}/ios/"
+        cp react-native/react-native-libsignal.podspec "${STAGING}/"
+
         # Scripts (for rebuilding from source if needed)
         cp -r react-native/scripts "${STAGING}/scripts"
 
@@ -159,6 +261,7 @@ jobs:
         echo ""
         echo "=== Native library sizes ==="
         find "${STAGING}" -name "*.so" -exec ls -lh {} \;
+        find "${STAGING}" -name "*.a" -exec ls -lh {} \;
         echo ""
 
         # Create zip

@@ -7,6 +7,14 @@ lib/
 cpp/signal_ffi.h
 cpp/signal_ffi_cpp.h
 android/jniLibs/
+
+# iOS build artifacts
+ios/libsignal_ffi.a
+ios/libsignal_ffi.xcframework/
+ios/.sim_staging/
+ios/.headers_device/
+ios/.headers_sim/
+
 example/node_modules/
 example/android/build/
 example/android/.gradle/
